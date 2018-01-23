@@ -86,6 +86,10 @@ def main(args):
                 images = facenet.load_data(paths_batch, False, False, args.image_size)
                 feed_dict = { images_placeholder:images, phase_train_placeholder:False }
                 emb_array[start_index:end_index,:] = sess.run(embeddings, feed_dict=feed_dict)
+
+            # Save embeddings to file
+#            with open('models/emb_array.bin', 'wb') as outfile:
+#                pickle.dump(emb_array, outfile)
             
             classifier_filename_exp = os.path.expanduser(args.classifier_filename)
 
@@ -93,6 +97,7 @@ def main(args):
                 # Train classifier
                 print('Training classifier')
                 model = SVC(kernel='linear', probability=True)
+                # model = SVC(kernel='rbf', gamma=1.0, probability=True)
                 model.fit(emb_array, labels)
             
                 # Create a list of class names
