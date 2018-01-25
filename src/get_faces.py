@@ -129,8 +129,10 @@ def main(args):
     
     img_path = args[1]
 
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
     with tf.Graph().as_default():      
-        with tf.Session() as sess:
+        with tf.Session(config = config) as sess:
             
             np.random.seed(666)
 
