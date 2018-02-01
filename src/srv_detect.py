@@ -13,9 +13,11 @@ import cv2
 import align.detect_face
 from scipy import misc
 import threading
+import time
 
 HOST = ''
 PORT = 8888
+CHUNK = 4096
 
 data_ready = False
 data_images = []
@@ -75,18 +77,28 @@ def get_square_box(x0, y0, x1, y1, max_w, max_h):
     return [x0, y0, x1, y1]
 
 
-def client_thread(conn):
+def get_images(conn):
     # Client should first send a list of images of the form:
     # <img_type0,size0>;<img_type1,size1>;...
-    data = conn.recv(2048).split(";")
+    data = conn.recv(2048)
+    data_split = data.decode().split(";")
     n = 0
-    for token in data:
+    for token in data_split:
+        if len(token) < 1:
+            continue
         image = token.split(",")
-        conn.send("OK")
-        img_data = conn.recv(int(image[1]))
-        img_name = "img" + str(n) + "." + image[0]
+        conn.send(str.encode("OK"))
+        print("Getting a " + image[0].lower() + " image of size " + image[1])        
+        img_name = "img" + str(n) + "." + image[0].lower()
         with open(img_name, 'wb') as f:
-            f.write(img_data)
+            for i in range(int(image[1]) // CHUNK):
+                img_data = conn.recv(CHUNK)
+                if len(img_data) != CHUNK:
+                    print("Error in receive: expected " + str(CHUNK) + " bytes, received " + str(len(img_data)) + " bytes")
+                f.write(img_data)
+            if (int(image[1]) // CHUNK) * CHUNK < int(image[1]):
+                img_data = conn.recv(int(image[1]))                
+                f.write(img_data)
             f.close()
         n = n + 1
         data_images.append(img_name)
@@ -139,32 +151,57 @@ def main(args):
             while True:
                 print("Waiting for a connection...")
                 conn, addr = sock.accept()
-                client_thread(conn)
-                total_boxes = bulk_detect_face(data_images, 0.25, pnet, rnet, onet, threshold, factor)
-                n = 0
+                startTime = time.time()
+                get_images(conn)
                 faces = []
-                for image in data_images:
-                    bounding_boxes = total_boxes[n]
-                    n = n + 1
-                    det = np.squeeze(bounding_boxes[i,0:4])
-                    x0 = max(int(det[0]) - 20, 0)
-                    x1 = min(int(det[2]) + 20, w-1)
-                    y0 = max(int(det[1]) - 20, 0)
-                    y1 = min(int(det[3]) + 20, h-1)
-                    [x0, y0, x1, y1] = get_square_box(x0, y0, x1, y1, w, h)
-                    cropped = img[y0:y1,x0:x1,:]
-                    scaled = misc.imresize(cropped, (160, 160), interp='bilinear')
-                    prew = facenet.prewhiten(scaled)
-                    faces.append(prew)
-                    boxes.append([x0, y0, x1, y1])
-                    # misc.imsave("roi" + str(i) + ".png", prew)
+                boxes = []
+                for img_path in data_images:
+                    try:
+                        img = misc.imread(img_path)
+                    except (IOError, ValueError, IndexError) as e:
+                        errorMessage = '{}: {}'.format(img_path, e)
+                        print(errorMessage)
+                        return
 
+                    if img.ndim < 2:
+                        print('Unable to align "%s"' % img_path)
+                        return
+                    elif img.ndim == 2:
+                        img = facenet.to_rgb(img)
+                    elif len(img.shape) > 2 and img.shape[2] == 4:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                    [h, w] = np.asarray(img.shape)[0:2]
+                    bounding_boxes, _ = align.detect_face.detect_face(img, minsize, pnet, rnet, onet, threshold, factor)
+                    nrof_faces = bounding_boxes.shape[0]
+                    for i in range(nrof_faces):
+                        det = np.squeeze(bounding_boxes[i,0:4])
+
+                        x0 = max(int(det[0]) - 20, 0)
+                        x1 = min(int(det[2]) + 20, w-1)
+                        y0 = max(int(det[1]) - 20, 0)
+                        y1 = min(int(det[3]) + 20, h-1)
+                    
+                        [x0, y0, x1, y1] = get_square_box(x0, y0, x1, y1, w, h)
+                        print(str(x0) + " " + str(y0) + " " + str(x1) + " " + str(y1))                    
+                        cropped = img[y0:y1,x0:x1,:]
+                        scaled = misc.imresize(cropped, (160, 160), interp='bilinear')
+                        prew = facenet.prewhiten(scaled)
+                        faces.append(prew)
+                        boxes.append([x0, y0, x1, y1])
+                
+                print('Face detection took {} s'.format(time.time() - startTime))
+     
                 emb_array = np.zeros((len(faces), embedding_size))
                 feed_dict = { images_placeholder:faces, phase_train_placeholder:False }
                 emb_array[:,:] = sess.run(embeddings, feed_dict=feed_dict)
                 predictions = model.predict_proba(emb_array)
                 best_class_indices = np.argmax(predictions, axis=1)
                 best_class_probabilities = predictions[np.arange(len(best_class_indices)), best_class_indices]
+                
+                print('Total processing took {} s'.format(time.time() - startTime))
+
+                for i in range(len(best_class_indices)):
+                    print('%4d  %s: %.3f' % (i, class_names[best_class_indices[i]], best_class_probabilities[i]))
                 
 
 if __name__ == "__main__":
